@@ -8,6 +8,8 @@ for your camera in the mujoco XML file.
 import argparse
 import time
 import xml.etree.ElementTree as ET
+from collections import deque
+from threading import Lock
 
 import numpy as np
 from pynput.keyboard import Controller, Key, Listener
@@ -32,6 +34,9 @@ class KeyboardHandler:
         cam_body_id (int): id corresponding to parent body of camera element
         """
         self.camera_mover = camera_mover
+        self.running = True
+        self._cmd_queue = deque(maxlen=256)
+        self._queue_lock = Lock()
 
         # make a thread to listen to keyboard and register our callback functions
         self.listener = Listener(on_press=self.on_press, on_release=self.on_release)
@@ -48,45 +53,52 @@ class KeyboardHandler:
         """
 
         try:
+            if key == Key.esc:
+                self.running = False
+                return False
+
             # controls for moving rotation
             if key == Key.up:
                 # rotate up
-                self.camera_mover.rotate_camera(point=None, axis=[1.0, 0.0, 0.0], angle=DELTA_ROT_KEY_PRESS)
+                self._push_command(("rotate", [1.0, 0.0, 0.0], DELTA_ROT_KEY_PRESS))
             elif key == Key.down:
                 # rotate down
-                self.camera_mover.rotate_camera(point=None, axis=[-1.0, 0.0, 0.0], angle=DELTA_ROT_KEY_PRESS)
+                self._push_command(("rotate", [-1.0, 0.0, 0.0], DELTA_ROT_KEY_PRESS))
             elif key == Key.left:
                 # rotate left
-                self.camera_mover.rotate_camera(point=None, axis=[0.0, 1.0, 0.0], angle=DELTA_ROT_KEY_PRESS)
+                self._push_command(("rotate", [0.0, 1.0, 0.0], DELTA_ROT_KEY_PRESS))
             elif key == Key.right:
                 # rotate right
-                self.camera_mover.rotate_camera(point=None, axis=[0.0, -1.0, 0.0], angle=DELTA_ROT_KEY_PRESS)
+                self._push_command(("rotate", [0.0, -1.0, 0.0], DELTA_ROT_KEY_PRESS))
 
             # controls for moving position
             elif key.char == "w":
                 # move forward
-                self.camera_mover.move_camera(direction=[0.0, 0.0, -1.0], scale=DELTA_POS_KEY_PRESS)
+                self._push_command(("move", [0.0, 0.0, -1.0], DELTA_POS_KEY_PRESS))
             elif key.char == "s":
                 # move backward
-                self.camera_mover.move_camera(direction=[0.0, 0.0, 1.0], scale=DELTA_POS_KEY_PRESS)
+                self._push_command(("move", [0.0, 0.0, 1.0], DELTA_POS_KEY_PRESS))
             elif key.char == "a":
                 # move left
-                self.camera_mover.move_camera(direction=[-1.0, 0.0, 0.0], scale=DELTA_POS_KEY_PRESS)
+                self._push_command(("move", [-1.0, 0.0, 0.0], DELTA_POS_KEY_PRESS))
             elif key.char == "d":
                 # move right
-                self.camera_mover.move_camera(direction=[1.0, 0.0, 0.0], scale=DELTA_POS_KEY_PRESS)
+                self._push_command(("move", [1.0, 0.0, 0.0], DELTA_POS_KEY_PRESS))
             elif key.char == "r":
                 # move up
-                self.camera_mover.move_camera(direction=[0.0, 1.0, 0.0], scale=DELTA_POS_KEY_PRESS)
+                self._push_command(("move", [0.0, 1.0, 0.0], DELTA_POS_KEY_PRESS))
             elif key.char == "f":
                 # move down
-                self.camera_mover.move_camera(direction=[0.0, -1.0, 0.0], scale=DELTA_POS_KEY_PRESS)
+                self._push_command(("move", [0.0, -1.0, 0.0], DELTA_POS_KEY_PRESS))
             elif key.char == ".":
                 # rotate counterclockwise
-                self.camera_mover.rotate_camera(point=None, axis=[0.0, 0.0, 1.0], angle=DELTA_ROT_KEY_PRESS)
+                self._push_command(("rotate", [0.0, 0.0, 1.0], DELTA_ROT_KEY_PRESS))
             elif key.char == "/":
                 # rotate clockwise
-                self.camera_mover.rotate_camera(point=None, axis=[0.0, 0.0, -1.0], angle=DELTA_ROT_KEY_PRESS)
+                self._push_command(("rotate", [0.0, 0.0, -1.0], DELTA_ROT_KEY_PRESS))
+            elif key.char == "q":
+                self.running = False
+                return False
 
         except AttributeError as e:
             pass
@@ -99,6 +111,24 @@ class KeyboardHandler:
             key: [NOT USED]
         """
         pass
+
+    def stop(self):
+        """Stops keyboard listener thread cleanly."""
+        self.running = False
+        if self.listener is not None:
+            self.listener.stop()
+            self.listener.join()
+
+    def _push_command(self, cmd):
+        with self._queue_lock:
+            self._cmd_queue.append(cmd)
+
+    def drain_commands(self):
+        """Returns a snapshot of queued camera commands and clears the queue."""
+        with self._queue_lock:
+            cmds = list(self._cmd_queue)
+            self._cmd_queue.clear()
+        return cmds
 
 
 def print_command(char, info):
@@ -129,6 +159,7 @@ if __name__ == "__main__":
     print_command("r-f", "pan the camera up/down")
     print_command("arrow keys", "rotate the camera to change view direction")
     print_command(".-/", "rotate the camera view without changing view direction")
+    print_command("q / esc", "quit and close safely")
     print("")
 
     # read camera XML tag from user input
@@ -206,21 +237,40 @@ if __name__ == "__main__":
 
     # just spin to let user interact with window
     spin_count = 0
-    while True:
-        action = np.zeros(env.action_dim)
-        obs, reward, done, _ = env.step(action)
-        env.render()
-        spin_count += 1
-        if spin_count % 500 == 0:
-            # convert from world coordinates to file coordinates (xml subtree)
-            camera_pos, camera_quat = camera_mover.get_camera_pose()
-            world_camera_pose = T.make_pose(camera_pos, T.quat2mat(camera_quat))
-            file_camera_pose = world_in_file.dot(world_camera_pose)
-            # TODO: Figure out why numba causes black screen of death (specifically, during mat2pose --> mat2quat call below)
-            camera_pos, camera_quat = T.mat2pose(file_camera_pose)
-            camera_quat = T.convert_quat(camera_quat, to="wxyz")
+    try:
+        while key_handler.running:
+            # Apply queued key commands from listener thread in the main sim thread.
+            for cmd_type, vec, scale in key_handler.drain_commands():
+                if cmd_type == "move":
+                    camera_mover.move_camera(direction=vec, scale=scale)
+                elif cmd_type == "rotate":
+                    camera_mover.rotate_camera(point=None, axis=vec, angle=scale)
 
-            print("\n\ncurrent camera tag you should copy")
-            cam_tree.set("pos", "{} {} {}".format(camera_pos[0], camera_pos[1], camera_pos[2]))
-            cam_tree.set("quat", "{} {} {} {}".format(camera_quat[0], camera_quat[1], camera_quat[2], camera_quat[3]))
-            print(ET.tostring(cam_tree, encoding="utf8").decode("utf8"))
+            action = np.zeros(env.action_dim)
+            obs, reward, done, _ = env.step(action)
+
+            # If viewer window closes externally, render() may fail in backend bindings.
+            try:
+                env.render()
+            except Exception:
+                break
+
+            spin_count += 1
+            if spin_count % 500 == 0:
+                # convert from world coordinates to file coordinates (xml subtree)
+                camera_pos, camera_quat = camera_mover.get_camera_pose()
+                world_camera_pose = T.make_pose(camera_pos, T.quat2mat(camera_quat))
+                file_camera_pose = world_in_file.dot(world_camera_pose)
+                # TODO: Figure out why numba causes black screen of death (specifically, during mat2pose --> mat2quat call below)
+                camera_pos, camera_quat = T.mat2pose(file_camera_pose)
+                camera_quat = T.convert_quat(camera_quat, to="wxyz")
+
+                print("\n\ncurrent camera tag you should copy")
+                cam_tree.set("pos", "{} {} {}".format(camera_pos[0], camera_pos[1], camera_pos[2]))
+                cam_tree.set("quat", "{} {} {} {}".format(camera_quat[0], camera_quat[1], camera_quat[2], camera_quat[3]))
+                print(ET.tostring(cam_tree, encoding="utf8").decode("utf8"))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        key_handler.stop()
+        env.close()

@@ -340,28 +340,32 @@ class CameraMover:
         tree = ET.fromstring(xml)
         wb = tree.find("worldbody")
 
-        # find the correct camera
+        # Find the camera recursively, since many env / robot cameras are nested
+        # under worldbody bodies instead of being direct worldbody children.
         camera_elem = None
-        cameras = wb.findall("camera")
-        for camera in cameras:
+        for camera in wb.findall(".//camera"):
             if camera.get("name") == camera_name:
                 camera_elem = camera
                 break
         assert camera_elem is not None
 
+        # Build a parent map to safely remove a nested camera element.
+        parent_map = {child: parent for parent in wb.iter() for child in parent}
+        camera_parent = parent_map[camera_elem]
+
         # add mocap body
         mocap = ET.SubElement(wb, "body")
         mocap.set("name", self.mover_body_name)
         mocap.set("mocap", "true")
-        mocap.set("pos", camera.get("pos"))
-        mocap.set("quat", camera.get("quat"))
+        mocap.set("pos", camera_elem.get("pos", "0 0 0"))
+        mocap.set("quat", camera_elem.get("quat", "1 0 0 0"))
         new_camera = ET.SubElement(mocap, "camera")
         new_camera.set("mode", "fixed")
-        new_camera.set("name", camera.get("name"))
+        new_camera.set("name", camera_elem.get("name"))
         new_camera.set("pos", "0 0 0")
 
         # remove old camera element
-        wb.remove(camera_elem)
+        camera_parent.remove(camera_elem)
 
         return ET.tostring(tree, encoding="utf8").decode("utf8")
 
