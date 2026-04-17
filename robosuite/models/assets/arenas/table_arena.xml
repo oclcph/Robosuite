@@ -48,8 +48,8 @@
     <!-- side view -->
     <camera mode="fixed" name="sideview" pos="-0.05651774593317116 1.2761224129427358 1.4879572214102434" quat="0.009905065491771751 0.006877963156909582 0.5912228352893879 0.806418094001364" />
 
-    <camera mode="fixed" name="agentview0" pos="0.5 0 1.35" quat="0.653 0.271 0.271 0.653"/>
-    <camera mode="fixed" name="agentview1" pos="0.5 0 1.35" quat="0.653 0.271 0.271 0.653"/>
+    <!-- <camera mode="fixed" name="agentview0" pos="0.91 0.0 1.54" quat="0.6026570796966553 0.3698708415031433 0.36987125873565674 0.6026568412780762" />
+    <camera mode="fixed" name="agentview1" pos="-0.08 0.89 1.54" quat="0.023 0.032 -0.5 -0.867"/> -->
     <camera mode="fixed" name="agentview2" pos="0.5 0 1.35" quat="0.653 0.271 0.271 0.653"/>
     <camera mode="fixed" name="agentview3" pos="0.5 0 1.35" quat="0.653 0.271 0.271 0.653"/>
   

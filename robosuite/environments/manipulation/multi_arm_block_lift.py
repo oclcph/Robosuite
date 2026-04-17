@@ -159,6 +159,17 @@ class MultiArmBlockLift(MultiArmEnv):
         )
         mujoco_arena.set_origin([0, 0, 0])
 
+        mujoco_arena.set_camera(
+            camera_name="agentview0",
+            pos=[0.91, 0.0, 1.54],
+            quat=[0.6026570796966553, 0.3698708415031433, 0.36987125873565674, 0.6026568412780762],
+        )
+        mujoco_arena.set_camera(
+            camera_name="agentview1",
+            pos=[-0.08, 0.89, 1.54],
+            quat=[0.023, 0.032, -0.5, -0.867],
+        )
+
         self.cubes = []
         colors = [
             [0.9, 0.1, 0.1, 1.0],
