@@ -12,6 +12,7 @@ from robosuite.environments.manipulation.two_arm_lift import TwoArmLift
 from robosuite.environments.manipulation.two_arm_peg_in_hole import TwoArmPegInHole
 from robosuite.environments.manipulation.two_arm_handover import TwoArmHandover
 from robosuite.environments.manipulation.two_arm_transport import TwoArmTransport
+from robosuite.environments.manipulation.multi_arm_block_lift import MultiArmBlockLift
 
 from robosuite.environments import ALL_ENVIRONMENTS
 from robosuite.controllers import (
@@ -38,10 +39,10 @@ try:
 
 except:
     ROBOSUITE_DEFAULT_LOGGER.warning(
-        "Could not load the mink-based whole-body IK. Make sure you install related import properly, otherwise you will not be able to use the default IK controller setting for GR1 robot."
+        "Could not load the mink-based whole-body IK. Make sure you install related import properly (e.g. pip install mink==0.0.5), otherwise you will not be able to use the default IK controller setting for GR1 robot."
     )
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 __logo__ = """
       ;     /        ,--.
      ["]   ["]  ,<  |__**|
