@@ -57,6 +57,7 @@ if __name__ == "__main__":
         camera_names=camera_names,
         camera_heights=camera_heights,
         camera_widths=camera_widths,
+        hard_reset=False,
     )
 
     obs = env.reset()
