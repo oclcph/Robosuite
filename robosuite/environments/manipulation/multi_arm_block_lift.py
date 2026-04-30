@@ -172,10 +172,10 @@ class MultiArmBlockLift(MultiArmEnv):
 
         self.cubes = []
         colors = [
-            # [0.9, 0.1, 0.1, 1.0],
-            # [0.1, 0.6, 0.9, 1.0],
-            [0.1, 0.8, 0.2, 1.0],
-            # [0.95, 0.8, 0.1, 1.0],
+            [0.90, 0.15, 0.15, 1.0], # red
+            # [0.15, 0.75, 0.20, 1.0], # green
+            # [0.15, 0.45, 0.90, 1.0], # blue
+            # [0.95, 0.80, 0.15, 1.0], # yellow
         ]
         for i in range(self.num_cubes):
             color = colors[i % len(colors)]
