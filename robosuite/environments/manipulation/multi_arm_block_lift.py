@@ -7,6 +7,7 @@ from robosuite.environments.manipulation.multi_arm_env import MultiArmEnv
 from robosuite.models.arenas import TableArena
 from robosuite.models.objects import BoxObject
 from robosuite.models.tasks import ManipulationTask
+from robosuite.utils.mjcf_utils import CustomMaterial
 from robosuite.utils.observables import Observable, sensor
 from robosuite.utils.placement_samplers import SequentialCompositeSampler, UniformRandomSampler
 from robosuite.utils.transform_utils import convert_quat
@@ -170,9 +171,26 @@ class MultiArmBlockLift(MultiArmEnv):
             quat=[0.023, 0.032, -0.5, -0.867],
         )
 
+        tex_attrib = {
+            "type": "cube",
+        }
+        mat_attrib = {
+            "texrepeat": "1 1",
+            "specular": "0.4",
+            "shininess": "0.1",
+        }
+        redwood = CustomMaterial(
+            texture="WoodRed",
+            tex_name="redwood",
+            mat_name="redwood_mat",
+            tex_attrib=tex_attrib,
+            mat_attrib=mat_attrib,
+        )
+
         self.cubes = []
         colors = [
-            [0.90, 0.15, 0.15, 1.0], # red
+            [1, 0, 0, 1],  # red
+            # [0.90, 0.15, 0.15, 1.0], # red
             # [0.15, 0.75, 0.20, 1.0], # green
             # [0.15, 0.45, 0.90, 1.0], # blue
             # [0.95, 0.80, 0.15, 1.0], # yellow
@@ -183,7 +201,8 @@ class MultiArmBlockLift(MultiArmEnv):
                 name=f"cube_{i}",
                 size_min=[self.cube_size, self.cube_size, self.cube_size],
                 size_max=[self.cube_size, self.cube_size, self.cube_size],
-                rgba=color
+                rgba=color,
+                material=redwood,
             )
             self.cubes.append(cube)
 
