@@ -146,7 +146,39 @@ def print_command(char, info):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", type=str, default="Lift")
-    parser.add_argument("--robots", nargs="+", type=str, default="Sawyer", help="Which robot(s) to use in the env")
+    parser.add_argument("--robots", nargs="+", type=str, default=["Sawyer"], help="Which robot(s) to use in the env")
+    parser.add_argument(
+        "--camera",
+        type=str,
+        default=None,
+        help="Camera name or full <camera ... /> XML tag to tune. If omitted, the script asks interactively.",
+    )
+    parser.add_argument(
+        "--table-full-size",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Table full size passed to the environment, e.g. --table-full-size 1.2 1.2 0.05",
+    )
+    parser.add_argument("--num-cubes", type=int, default=None, help="Number of cubes for MultiArmBlockLift.")
+    parser.add_argument("--cube-size", type=float, default=None, help="Half-size of each cube for MultiArmBlockLift.")
+    parser.add_argument(
+        "--cube-spawn-range",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("X", "Y"),
+        help="Uniform spawn range around table center for MultiArmBlockLift cubes.",
+    )
+    parser.add_argument(
+        "--arm-positions",
+        nargs="+",
+        type=str,
+        default=None,
+        choices=["west", "south", "east", "north"],
+        help="Explicit robot sides for MultiArmBlockLift, in robot order.",
+    )
     args = parser.parse_args()
 
     print("\nWelcome to the camera tuning script! You will be able to tune a camera view")
@@ -162,12 +194,14 @@ if __name__ == "__main__":
     print_command("q / esc", "quit and close safely")
     print("")
 
-    # read camera XML tag from user input
-    inp = input(
-        "\nPlease paste a camera name below \n"
-        "OR xml tag below (e.g. <camera ... />) \n"
-        "OR leave blank for an example:\n"
-    )
+    # read camera XML tag from CLI or user input
+    inp = args.camera
+    if inp is None:
+        inp = input(
+            "\nPlease paste a camera name below \n"
+            "OR xml tag below (e.g. <camera ... />) \n"
+            "OR leave blank for an example:\n"
+        )
 
     if len(inp) == 0:
         if args.env != "Lift":
@@ -190,6 +224,18 @@ if __name__ == "__main__":
     cam_tree = ET.fromstring(inp) if from_tag else ET.Element("camera", attrib={"name": inp})
     CAMERA_NAME = cam_tree.get("name")
 
+    env_kwargs = {}
+    if args.table_full_size is not None:
+        env_kwargs["table_full_size"] = tuple(args.table_full_size)
+    if args.num_cubes is not None:
+        env_kwargs["num_cubes"] = args.num_cubes
+    if args.cube_size is not None:
+        env_kwargs["cube_size"] = args.cube_size
+    if args.cube_spawn_range is not None:
+        env_kwargs["cube_spawn_range"] = tuple(args.cube_spawn_range)
+    if args.arm_positions is not None:
+        env_kwargs["arm_positions"] = args.arm_positions
+
     # make the environment
     env = robosuite.make(
         args.env,
@@ -199,6 +245,7 @@ if __name__ == "__main__":
         ignore_done=True,
         use_camera_obs=False,
         control_freq=100,
+        **env_kwargs,
     )
     env.reset()
 
