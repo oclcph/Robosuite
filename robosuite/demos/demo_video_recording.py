@@ -18,6 +18,27 @@ from robosuite import make
 # (which uses opencv convention)
 macros.IMAGE_CONVENTION = "opencv"
 
+
+def expand_robot_camera_names(camera_names, robots):
+    """
+    Expands robot camera shorthands into explicit per-robot camera names.
+
+    For multi-robot environments, cameras such as eye_in_hand are named
+    robot0_eye_in_hand, robot1_eye_in_hand, etc.
+    """
+    robot_count = len(robots) if isinstance(robots, list) else 1
+    expanded = []
+    for camera in camera_names:
+        if camera.startswith("all-"):
+            camera_key = camera.replace("all-", "", 1)
+            expanded.extend([f"robot{i}_{camera_key}" for i in range(robot_count)])
+        elif camera in {"eye_in_hand", "robotview"}:
+            expanded.extend([f"robot{i}_{camera}" for i in range(robot_count)])
+        else:
+            expanded.append(camera)
+    return expanded
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -30,13 +51,27 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--skip_frame", type=int, default=1)
+    parser.add_argument(
+        "--table-full-size",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Optional table full size passed to environments that support it, e.g. 1.1 1.1 0.05",
+    )
+    parser.add_argument(
+        "--num-cubes",
+        type=int,
+        default=None,
+        help="Optional number of cubes passed to environments that support it, e.g. MultiArmBlockLift.",
+    )
     args = parser.parse_args()
 
     args.root = os.path.join(args.root, args.environment + "_" + "_".join(args.robots))
     if not os.path.exists(args.root):
         os.makedirs(args.root)
 
-    camera_names = list(args.camera)
+    camera_names = expand_robot_camera_names(list(args.camera), args.robots)
     if len(camera_names) == 1:
         camera_heights = args.height
         camera_widths = args.width
@@ -45,6 +80,11 @@ if __name__ == "__main__":
         camera_widths = [args.width for _ in camera_names]
 
     video_paths = {camera: os.path.join(args.root, camera + ".mp4") for camera in camera_names}
+    env_kwargs = {}
+    if args.table_full_size is not None:
+        env_kwargs["table_full_size"] = tuple(args.table_full_size)
+    if args.num_cubes is not None:
+        env_kwargs["num_cubes"] = args.num_cubes
 
     # initialize an environment with offscreen renderer
     env = make(
@@ -57,6 +97,7 @@ if __name__ == "__main__":
         camera_names=camera_names,
         camera_heights=camera_heights,
         camera_widths=camera_widths,
+        **env_kwargs,
     )
 
     obs = env.reset()
