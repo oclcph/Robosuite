@@ -13,6 +13,7 @@ from robosuite.environments.manipulation.two_arm_peg_in_hole import TwoArmPegInH
 from robosuite.environments.manipulation.two_arm_handover import TwoArmHandover
 from robosuite.environments.manipulation.two_arm_transport import TwoArmTransport
 from robosuite.environments.manipulation.multi_arm_block_lift import MultiArmBlockLift
+from robosuite.environments.manipulation.multi_arm_pick_place import MultiArmPickPlace
 
 from robosuite.environments import ALL_ENVIRONMENTS
 from robosuite.controllers import (
