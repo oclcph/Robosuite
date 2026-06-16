@@ -8,7 +8,7 @@ from robosuite.environments.manipulation.multi_arm_env import MultiArmEnv
 from robosuite.models.arenas import TableArena
 from robosuite.models.objects import BoxObject
 from robosuite.models.tasks import ManipulationTask
-from robosuite.utils.mjcf_utils import new_site
+from robosuite.utils.mjcf_utils import new_geom
 from robosuite.utils.observables import Observable, sensor
 from robosuite.utils.placement_samplers import SequentialCompositeSampler, UniformRandomSampler
 from robosuite.utils.transform_utils import convert_quat
@@ -22,6 +22,11 @@ PALETTE = [
     ("yellow", [0.95, 0.80, 0.10, 1.0]),
 ]
 
+NEUTRAL_ZONE_RGBA = [0.28, 0.28, 0.28, 0.55]
+GRIPPER_CUBE_ALIGNMENT_REWARD_SCALE = 0.15
+GRIPPER_CUBE_ALIGNMENT_XY_SIGMA = 0.12
+GRIPPER_CUBE_ALIGNMENT_Z_MARGIN = 0.18
+
 
 class MultiArmPickPlace(MultiArmEnv):
     """
@@ -30,15 +35,14 @@ class MultiArmPickPlace(MultiArmEnv):
     Setup (1-4 single-arm robots around a table):
         - There are exactly N cubes (N = number of arms), each a distinct color
           (cube k is PALETTE[k]).
-        - Each arm i owns a fixed target zone (a flat colored marker) on its own
-          side of the table.
+        - Each arm i owns a fixed target tray on its own side of the table.
         - Every episode a random permutation assigns arm i a color; arm i's zone
           is recolored to that color. The arm must pick the cube of its assigned
           color and place it into its (matching-colored) zone.
         - Success = every cube resting inside the zone of its matching color
           ("clear the table" by color). The arm->color map varies across episodes.
 
-    The arm->color assignment is encoded in the model XML (zone marker rgba), so
+    The arm->color assignment is encoded in the model XML (target tray geom rgba), so
     it is reproduced deterministically when demonstrations are replayed for
     observation extraction.
     """
@@ -56,10 +60,14 @@ class MultiArmPickPlace(MultiArmEnv):
         arm_positions=None,
         position_radius_scale=1.0,
         num_cubes=None,
+        num_colors=None,
+        target_color_ids=None,
         cube_size=0.022,
         cube_spawn_range=(0.20, 0.20),
         zone_radius=0.30,
         zone_half_size=0.08,
+        use_matching_zone_colors=True,
+        neutral_zone_rgba=NEUTRAL_ZONE_RGBA,
         place_xy_tol=0.08,
         place_z_tol=0.08,
         use_camera_obs=True,
@@ -95,20 +103,34 @@ class MultiArmPickPlace(MultiArmEnv):
         self.position_radius_scale = position_radius_scale
 
         n_arms = len(robots) if isinstance(robots, (list, tuple)) else 1
-        if n_arms > len(PALETTE):
-            raise ValueError(f"Only {len(PALETTE)} colors defined; cannot support {n_arms} arms.")
-        # one color per arm; there can be MORE cubes than arms (several cubes per
-        # color). cube k has color (k % n_colors).
-        self.n_colors = n_arms
+        # By default this preserves the original multi-arm semantics: one cube
+        # color per arm. Single-arm collection can pass num_colors > 1 to add
+        # colored distractor cubes while assigning only one target color to the
+        # active arm.
+        self.n_colors = int(num_colors) if num_colors is not None else n_arms
+        if self.n_colors < n_arms:
+            raise ValueError(f"num_colors ({self.n_colors}) must be >= num arms ({n_arms}).")
+        if self.n_colors > len(PALETTE):
+            raise ValueError(f"Only {len(PALETTE)} colors defined; cannot support {self.n_colors} colors.")
         self.num_cubes = int(num_cubes) if num_cubes is not None else 2 * n_arms
-        if self.num_cubes < n_arms:
-            raise ValueError(f"num_cubes ({self.num_cubes}) must be >= num arms ({n_arms}).")
+        if self.num_cubes < self.n_colors:
+            raise ValueError(f"num_cubes ({self.num_cubes}) must be >= num_colors ({self.n_colors}).")
         self.cube_color_ids = [k % self.n_colors for k in range(self.num_cubes)]
+        self.target_color_ids = None if target_color_ids is None else np.array(target_color_ids, dtype=int)
+        if self.target_color_ids is not None:
+            if len(self.target_color_ids) != n_arms:
+                raise ValueError(
+                    f"target_color_ids length ({len(self.target_color_ids)}) must match num arms ({n_arms})."
+                )
+            if np.any(self.target_color_ids < 0) or np.any(self.target_color_ids >= self.n_colors):
+                raise ValueError(f"target_color_ids must be in [0, {self.n_colors}).")
         self.cube_size = float(cube_size)
         self.cube_spawn_range = np.array(cube_spawn_range, dtype=float)
 
         self.zone_radius = float(zone_radius)
         self.zone_half_size = float(zone_half_size)
+        self.use_matching_zone_colors = bool(use_matching_zone_colors)
+        self.neutral_zone_rgba = np.array(neutral_zone_rgba, dtype=float)
         self.place_xy_tol = float(place_xy_tol)
         self.place_z_tol = float(place_z_tol)
 
@@ -160,9 +182,68 @@ class MultiArmPickPlace(MultiArmEnv):
     def reward(self, action=None):
         placed = self._cubes_placed()
         reward = float(np.sum(placed))  # +1 per correctly placed cube
+        reward += self._gripper_cube_alignment_reward(placed)
         if self.reward_scale is not None:
-            reward *= self.reward_scale / max(self.num_cubes, 1)
+            reward *= self.reward_scale / max(len(self._target_cube_indices()), 1)
         return reward
+
+    @staticmethod
+    def _wrap_to_pi(angle):
+        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+    @classmethod
+    def _edge_parallel_yaw_error(cls, gripper_yaw, cube_yaw):
+        """Smallest yaw error when cube edges are equivalent every 90 degrees."""
+        errors = [abs(cls._wrap_to_pi(gripper_yaw - cube_yaw - k * np.pi / 2.0)) for k in range(4)]
+        return min(errors)
+
+    def _gripper_cube_alignment_reward(self, placed):
+        target_indices = self._target_cube_indices()
+        if len(target_indices) == 0:
+            return 0.0
+
+        total = 0.0
+        xy_sigma = max(GRIPPER_CUBE_ALIGNMENT_XY_SIGMA, 1e-6)
+        for placed_idx, cube_idx in enumerate(target_indices):
+            if placed_idx < len(placed) and placed[placed_idx]:
+                continue
+            color_id = self.cube_color_ids[cube_idx]
+            arm_idx = int(self.color_to_zone[color_id])
+            if arm_idx < 0 or arm_idx >= len(self.robots):
+                continue
+
+            cube_body_id = self.cube_body_ids[f"cube_{cube_idx}"]
+            cube_pos = np.array(self.sim.data.body_xpos[cube_body_id])
+            eef_site_id = self.robots[arm_idx].eef_site_id["right"]
+            eef_pos = np.array(self.sim.data.site_xpos[eef_site_id])
+
+            xy_dist = np.linalg.norm(eef_pos[:2] - cube_pos[:2])
+            z_above_cube = eef_pos[2] - cube_pos[2]
+            if z_above_cube < -0.02 or z_above_cube > GRIPPER_CUBE_ALIGNMENT_Z_MARGIN:
+                continue
+
+            cube_mat = np.array(self.sim.data.body_xmat[cube_body_id]).reshape(3, 3)
+            eef_mat = np.array(self.sim.data.site_xmat[eef_site_id]).reshape(3, 3)
+            cube_yaw = float(np.arctan2(cube_mat[1, 0], cube_mat[0, 0]))
+            eef_yaw = float(np.arctan2(eef_mat[1, 0], eef_mat[0, 0]))
+            yaw_error = self._edge_parallel_yaw_error(eef_yaw, cube_yaw)
+
+            distance_weight = np.exp(-0.5 * (xy_dist / xy_sigma) ** 2)
+            alignment_score = max(0.0, np.cos(yaw_error))
+            total += GRIPPER_CUBE_ALIGNMENT_REWARD_SCALE * distance_weight * alignment_score
+        return total
+
+    def _make_color_to_zone(self):
+        color_to_zone = -np.ones(self.n_colors, dtype=int)
+        for arm_idx, color_id in enumerate(self.arm_to_color):
+            color_to_zone[int(color_id)] = arm_idx
+        return color_to_zone
+
+    def _target_cube_indices(self):
+        if self.arm_to_color is None:
+            return list(range(self.num_cubes))
+        active_colors = set(int(c) for c in self.arm_to_color)
+        return [k for k, color_id in enumerate(self.cube_color_ids) if int(color_id) in active_colors]
 
     def _load_model(self):
         super()._load_model()
@@ -216,13 +297,23 @@ class MultiArmPickPlace(MultiArmEnv):
             )
             self.cubes.append(cube)
 
-        # per-episode random arm -> color assignment, encoded in zone marker colors
-        self.arm_to_color = np.array(self.rng.permutation(self.n_colors), dtype=int)
-        self.color_to_zone = np.argsort(self.arm_to_color)  # color id -> arm/zone index
+        # per-episode arm -> color assignment. If fewer arms than colors, inactive
+        # colors become distractors and are ignored by success / reward.
+        if self.target_color_ids is None:
+            self.arm_to_color = np.array(self.rng.permutation(self.n_colors)[: len(self.robots)], dtype=int)
+        else:
+            self.arm_to_color = self.target_color_ids.copy()
+        self.color_to_zone = self._make_color_to_zone()  # color id -> arm/zone index, -1 for distractors
 
-        # target zone markers (flat colored boxes) on each arm's side
+        # Visible target trays on each arm's side. They are static visual geoms,
+        # so they do not perturb the scripted demonstrations while still showing
+        # an actual bin / tray in RGB observations.
         self.zone_names = []
         zone_pos_list = []
+        tray_wall_height = 0.035
+        tray_floor_thickness = 0.004
+        tray_wall_thickness = 0.008
+        tray_half = self.zone_half_size
         for i, side in enumerate(placements):
             yaw = self._SIDE_TO_YAW[side]
             rot_mat = T.euler2mat(np.array((0, 0, yaw)))
@@ -232,15 +323,50 @@ class MultiArmPickPlace(MultiArmEnv):
             color_id = int(self.arm_to_color[i])
             zone_name = f"zone_{i}"
             self.zone_names.append(zone_name)
-            site = new_site(
-                name=zone_name,
-                pos=zone_pos.tolist(),
-                size=[self.zone_half_size, self.zone_half_size, 0.001],
-                rgba=PALETTE[color_id][1],
-                type="box",
-                group="1",
+            zone_rgba = PALETTE[color_id][1] if self.use_matching_zone_colors else self.neutral_zone_rgba
+            zone_rgba = np.asarray(zone_rgba, dtype=float).tolist()
+
+            def append_tray_geom(suffix, pos, size):
+                mujoco_arena.worldbody.append(
+                    new_geom(
+                        name=f"{zone_name}_{suffix}",
+                        type="box",
+                        pos=pos,
+                        size=size,
+                        rgba=zone_rgba,
+                        group="1",
+                        contype="0",
+                        conaffinity="0",
+                    )
+                )
+
+            floor_z = self.table_top_z + tray_floor_thickness / 2.0
+            wall_z = self.table_top_z + tray_floor_thickness + tray_wall_height / 2.0
+            append_tray_geom(
+                "floor",
+                [zone_pos[0], zone_pos[1], floor_z],
+                [tray_half, tray_half, tray_floor_thickness / 2.0],
             )
-            mujoco_arena.worldbody.append(site)
+            append_tray_geom(
+                "north_wall",
+                [zone_pos[0], zone_pos[1] + tray_half + tray_wall_thickness / 2.0, wall_z],
+                [tray_half + tray_wall_thickness, tray_wall_thickness / 2.0, tray_wall_height / 2.0],
+            )
+            append_tray_geom(
+                "south_wall",
+                [zone_pos[0], zone_pos[1] - tray_half - tray_wall_thickness / 2.0, wall_z],
+                [tray_half + tray_wall_thickness, tray_wall_thickness / 2.0, tray_wall_height / 2.0],
+            )
+            append_tray_geom(
+                "east_wall",
+                [zone_pos[0] + tray_half + tray_wall_thickness / 2.0, zone_pos[1], wall_z],
+                [tray_wall_thickness / 2.0, tray_half + tray_wall_thickness, tray_wall_height / 2.0],
+            )
+            append_tray_geom(
+                "west_wall",
+                [zone_pos[0] - tray_half - tray_wall_thickness / 2.0, zone_pos[1], wall_z],
+                [tray_wall_thickness / 2.0, tray_half + tray_wall_thickness, tray_wall_height / 2.0],
+            )
         self.zone_positions = np.array(zone_pos_list)
 
         # cube placement sampler: spawn near table centre
@@ -281,15 +407,20 @@ class MultiArmPickPlace(MultiArmEnv):
         # loaded model (robust to XML replay where _load_model isn't re-run)
         zone_pos, arm_to_color = [], []
         palette_rgba = np.array([c[1] for c in PALETTE])
-        for i in range(self.n_colors):
-            sid = self.sim.model.site_name2id(f"zone_{i}")
-            zone_pos.append(np.array(self.sim.model.site_pos[sid]))
-            rgba = np.array(self.sim.model.site_rgba[sid])
+        for i in range(len(self.robots)):
+            gid = self.sim.model.geom_name2id(f"zone_{i}_floor")
+            pos = np.array(self.sim.model.geom_pos[gid])
+            pos[2] = self.table_top_z + 0.001
+            zone_pos.append(pos)
+            rgba = np.array(self.sim.model.geom_rgba[gid])
             color_id = int(np.argmin(np.linalg.norm(palette_rgba - rgba, axis=1)))
             arm_to_color.append(color_id)
         self.zone_positions = np.array(zone_pos)
-        self.arm_to_color = np.array(arm_to_color, dtype=int)
-        self.color_to_zone = np.argsort(self.arm_to_color)
+        if self.target_color_ids is not None:
+            self.arm_to_color = self.target_color_ids.copy()
+        elif self.use_matching_zone_colors:
+            self.arm_to_color = np.array(arm_to_color, dtype=int)
+        self.color_to_zone = self._make_color_to_zone()
 
     def _setup_observables(self):
         observables = super()._setup_observables()
@@ -312,7 +443,7 @@ class MultiArmPickPlace(MultiArmEnv):
                 sensors.extend([cube_pos, cube_quat])
 
             # per-arm goal: the xy position and color id of that arm's target zone
-            for i in range(self.n_colors):
+            for i in range(len(self.robots)):
 
                 @sensor(modality=modality)
                 def goal_pos(obs_cache, arm_idx=i):
@@ -340,15 +471,18 @@ class MultiArmPickPlace(MultiArmEnv):
 
     def _cubes_placed(self):
         """Boolean array: is cube k resting inside the zone of its matching color?"""
-        placed = np.zeros(self.num_cubes, dtype=bool)
-        for k in range(self.num_cubes):
+        target_indices = self._target_cube_indices()
+        placed = np.zeros(len(target_indices), dtype=bool)
+        for placed_idx, k in enumerate(target_indices):
             color_id = self.cube_color_ids[k]
             zone_idx = int(self.color_to_zone[color_id])
+            if zone_idx < 0:
+                continue
             target = self.zone_positions[zone_idx]
             cube_pos = self.sim.data.body_xpos[self.cube_body_ids[f"cube_{k}"]]
             xy_ok = np.linalg.norm(cube_pos[:2] - target[:2]) < self.place_xy_tol
             z_ok = cube_pos[2] < self.table_top_z + self.place_z_tol
-            placed[k] = xy_ok and z_ok
+            placed[placed_idx] = xy_ok and z_ok
         return placed
 
     def _check_success(self):
